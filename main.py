@@ -32,11 +32,13 @@ def main() -> None:
     ticker = args.ticker.upper()
 
     from fairprice.data import FinancialsClient, MacroClient, MarketClient
+    from fairprice.nlp import SentimentClient
     import fairprice.valuation as valuation_engine
 
     fin = FinancialsClient()
     mkt = MarketClient()
     mac = MacroClient()
+    nlp = SentimentClient()
 
     print(f"\n{_SEP}")
     print(f"  FairPrice  |  {ticker}")
@@ -96,7 +98,8 @@ def main() -> None:
 
     # ── Valuation ─────────────────────────────────────────────────────────
     print(f"\n{_LINE}  VALUATION")
-    result = valuation_engine.estimate(stmts, market, macro, peers)
+    sent = nlp.get_sentiment(ticker)
+    result = valuation_engine.estimate(stmts, market, macro, peers, sentiment=sent)
 
     print(f"\n  {'Model':<20} {'Value':>10}")
     print(f"  {'─'*20}  {'─'*10}")
@@ -124,6 +127,27 @@ def main() -> None:
             print(f"    • {note}")
 
     _verdict(result.margin_of_safety, result.confidence_score)
+
+    # ── Sentiment ─────────────────────────────────────────────────────────
+    if sent and (sent.n_articles + sent.n_reddit_posts) > 0:
+        print(f"\n{_LINE}  SENTIMENT  [{sent.backend}]")
+        score_bar = _sentiment_bar(sent.sentiment_score)
+        print(f"  Score   {sent.sentiment_score:+.3f}  {score_bar}")
+        print(f"  Positive {sent.positive_ratio*100:4.0f}%  |  "
+              f"Negative {sent.negative_ratio*100:4.0f}%  |  "
+              f"Neutral {sent.neutral_ratio*100:4.0f}%")
+        print(f"  Uncertainty   : {sent.uncertainty_score:.2f}")
+        if sent.analyst_consensus:
+            print(f"  Analyst (FinViz): {sent.analyst_consensus.upper()}")
+        if sent.guidance_revision:
+            print(f"  Guidance revision: {sent.guidance_revision.upper()}")
+        print(f"  Articles: {sent.n_articles}  |  Alpaca: {sent.n_alpaca_articles}"
+              f"  |  Sources: {', '.join(sent.sources) or 'none'}")
+        if sent.top_headlines:
+            print(f"\n  Recent headlines:")
+            for h in sent.top_headlines:
+                print(f"    › {h[:90]}")
+
     print(f"\n{_SEP}\n")
 
 
@@ -138,6 +162,18 @@ def _show_df(df, cols: list[str], label: str, scale: float = 1.0) -> None:
     subset = df[available].tail(5) / scale
     print(f"\n  {label}:")
     print(subset.to_string(float_format=lambda x: f"{x:8.2f}").replace("\n", "\n  "))
+
+
+def _sentiment_bar(score: float, width: int = 20) -> str:
+    """ASCII bar: negative ◀ │ ▶ positive, centred at zero."""
+    mid = width // 2
+    pos = int((score + 1) / 2 * width)
+    bar = [" "] * width
+    if 0 <= pos < width:
+        bar[pos] = "█"
+    bar[mid] = "│" if bar[mid] == " " else "█"
+    label = "▼ BEARISH" if score < -0.3 else "▲ BULLISH" if score > 0.3 else "~ NEUTRAL"
+    return f"[{''.join(bar)}] {label}"
 
 
 def _verdict(mos: float, conf: float) -> None:

@@ -22,6 +22,7 @@ from fairprice.schemas import (
     FinancialStatements,
     MacroData,
     MarketData,
+    SentimentData,
     ValuationResult,
 )
 
@@ -53,6 +54,7 @@ def estimate(
     market: MarketData,
     macro: MacroData,
     peers: Optional[list[str]] = None,
+    sentiment: Optional[SentimentData] = None,
 ) -> ValuationResult:
     notes: list[str] = []
 
@@ -101,6 +103,7 @@ def estimate(
             margin_of_safety=0.0,
             confidence_score=0.0,
             notes=notes,
+            sentiment=sentiment,
         )
 
     # Normalise weights to models that produced results
@@ -121,6 +124,7 @@ def estimate(
         vix=market.vix,
         statements=statements,
     )
+    confidence = _sentiment_adjust(confidence, sentiment, notes)
 
     return ValuationResult(
         ticker=statements.ticker,
@@ -134,6 +138,7 @@ def estimate(
         margin_of_safety=round(mos, 4),
         confidence_score=round(confidence, 4),
         notes=notes,
+        sentiment=sentiment,
     )
 
 
@@ -173,6 +178,52 @@ def _safe_ml(statements, market, macro, notes):
         notes.append(f"ML: error — {exc}")
         logger.exception("ML failed for %s", statements.ticker)
         return None
+
+
+# ── Sentiment confidence adjustment ─────────────────────────────────────────
+
+def _sentiment_adjust(
+    confidence: float,
+    sentiment: Optional[SentimentData],
+    notes: list[str],
+) -> float:
+    """
+    Apply a small sentiment-driven multiplier to the raw confidence score.
+
+    We deliberately keep the adjustment small (±10%) because sentiment is
+    noisy and short-term — it should not override fundamental model agreement.
+
+    Rules:
+      • score < −0.3  AND uncertainty > 0.5  →  × 0.90  (bearish + uncertain)
+      • guidance == 'lowered'                 →  × 0.95  (negative revision)
+      • score > +0.4                          →  × 1.05  (clearly positive)
+      • guidance == 'raised'                  →  × 1.03  (positive revision)
+    """
+    if sentiment is None or sentiment.n_articles + sentiment.n_alpaca_articles == 0:
+        return confidence
+
+    mult = 1.0
+
+    if sentiment.sentiment_score < -0.3 and sentiment.uncertainty_score > 0.5:
+        mult *= 0.90
+        notes.append(
+            f"Sentiment: bearish ({sentiment.sentiment_score:+.2f}) + high uncertainty "
+            f"({sentiment.uncertainty_score:.2f}) — confidence reduced"
+        )
+
+    if sentiment.guidance_revision == "lowered":
+        mult *= 0.95
+        notes.append("Sentiment: guidance lowered — confidence reduced")
+
+    if sentiment.sentiment_score > 0.4:
+        mult *= 1.05
+        notes.append(f"Sentiment: positive ({sentiment.sentiment_score:+.2f}) — confidence boosted")
+
+    if sentiment.guidance_revision == "raised":
+        mult *= 1.03
+        notes.append("Sentiment: guidance raised — confidence boosted")
+
+    return float(np.clip(confidence * mult, 0.0, 1.0))
 
 
 # ── Confidence scoring ───────────────────────────────────────────────────────

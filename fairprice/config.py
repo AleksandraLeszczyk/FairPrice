@@ -14,6 +14,10 @@ class Settings(BaseSettings):
     fmp_api_key: str = ""       # https://financialmodelingprep.com/developer  (250 req/day free)
     polygon_api_key: str = ""   # https://polygon.io  (5 req/min free, delayed)
 
+    # --- Alpaca (market data + news — same key as MarketView) ---
+    alpaca_api_key: str = ""    # ALPACA_API_KEY — https://alpaca.markets
+    alpaca_secret: str = ""     # ALPACA_SECRET
+
     # --- Cache ---
     cache_dir: Path = Path(".cache")
     cache_ttl_prices: int = 300         # 5 min — intraday prices

@@ -18,7 +18,7 @@ from .base import CachedClient, RateLimiter
 
 logger = logging.getLogger(__name__)
 
-FMP_BASE = "https://financialmodelingprep.com/api/v3"
+FMP_BASE = "https://financialmodelingprep.com/stable"
 _fmp_limiter = RateLimiter(calls_per_minute=8)   # conservative within free 250/day cap
 
 
@@ -97,11 +97,12 @@ class FinancialsClient(CachedClient):
             return []
         try:
             _fmp_limiter.wait()
-            url = f"{FMP_BASE}/stock_peers?symbol={ticker}&apikey={settings.fmp_api_key}"
+            url = f"{FMP_BASE}/stock-peers?symbol={ticker}&apikey={settings.fmp_api_key}"
             r = requests.get(url, timeout=10)
             r.raise_for_status()
             data = r.json()
-            return data[0].get("peersList", [])[:10] if data else []
+            # return data[0].get("peersList", [])[:10] if data else []
+            return data or []
         except Exception as exc:
             logger.warning("Peer fetch failed for %s: %s", ticker, exc)
             return []
@@ -141,8 +142,8 @@ class FinancialsClient(CachedClient):
         def _get(endpoint: str) -> pd.DataFrame:
             _fmp_limiter.wait()
             url = (
-                f"{FMP_BASE}/{endpoint}/{ticker}"
-                f"?limit={settings.financial_history_years}"
+                f"{FMP_BASE}/{endpoint}?symbol={ticker}"
+                f"&limit={settings.financial_history_years}"
                 f"&apikey={settings.fmp_api_key}"
             )
             r = requests.get(url, timeout=10)

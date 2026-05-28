@@ -61,6 +61,26 @@ class MacroData:
 
 
 @dataclass
+class SentimentData:
+    ticker: str
+    # Aggregate sentiment (−1 = very negative, +1 = very positive)
+    sentiment_score: float
+    positive_ratio: float
+    negative_ratio: float
+    neutral_ratio: float
+    # Qualitative signals
+    uncertainty_score: float        # 0–1, fraction of texts with uncertainty language
+    guidance_revision: Optional[str]   # 'raised' | 'lowered' | 'reiterated' | None
+    analyst_consensus: Optional[str]   # 'buy' | 'hold' | 'sell' | None (FinViz)
+    # Coverage
+    n_articles: int           # yfinance + FinViz
+    n_alpaca_articles: int    # Alpaca News API
+    backend: str              # 'finbert' | 'vader' | 'keyword'
+    sources: list[str] = field(default_factory=list)
+    top_headlines: list[str] = field(default_factory=list)
+
+
+@dataclass
 class ValuationResult:
     ticker: str
     current_price: float
@@ -75,3 +95,4 @@ class ValuationResult:
     margin_of_safety: float     # (fair_value_base - price) / fair_value_base
     confidence_score: float     # 0–1, based on data completeness + model agreement
     notes: list[str] = field(default_factory=list)
+    sentiment: Optional[SentimentData] = None
