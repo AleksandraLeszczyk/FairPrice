@@ -30,10 +30,12 @@ plotly>=5.18
 matplotlib>=3.8
 seaborn>=0.13
 
-# ── NLP / Sentiment (optional — heavy, install separately if needed) ──────────
+# ── NLP / Sentiment ───────────────────────────────────────────────────────────
+beautifulsoup4>=4.12   # FinViz scraping — lightweight, no key needed
+vaderSentiment>=3.3    # Tier-2 NLP backend; fast, no GPU needed
+# Tier-1 (best quality, heavy — install manually if GPU is available):
 # transformers>=4.38
 # torch>=2.2
-# praw>=7.7          # Reddit API client
 
 # ── Dev / testing ─────────────────────────────────────────────────────────────
 pytest>=8.0
