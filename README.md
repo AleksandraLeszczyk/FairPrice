@@ -112,7 +112,35 @@ python main.py NVDA --log-level DEBUG
 
 # Bypass disk cache (forces fresh API calls)
 python main.py MSFT --no-cache
+
+# Compare two or more tickers side by side
+python main.py --compare AAPL MSFT GOOG
 ```
+
+Comparison output:
+
+```
+==========================================================
+  FairPrice  |  COMPARE: AAPL  ·  MSFT  ·  GOOG
+==========================================================
+
+  Metric                        AAPL          MSFT          GOOG
+  ──────────────────    ────────────  ────────────  ────────────
+  Company                 Apple Inc. Microsoft Cor Alphabet Inc.
+  Sector                  Technology    Technology Communication
+  Price                      $312.51       $426.99       $386.12
+  Fair value (base)          $106.81       $158.41       $147.94
+    range low                 $96.10       $125.26       $114.88
+    range high               $115.22       $191.11       $187.38
+  Margin of safety             -193%         -170%         -161%
+  Confidence                    0.62          0.48          0.45
+  Sentiment                  +0.13 ~       +0.15 ~       +0.12 ~
+  Analyst                          –             –             –
+  Verdict                     ▼ OVER        ~ FAIR        ~ FAIR
+```
+
+A ticker that fails to fetch is reported inline and skipped, so one bad symbol
+never aborts the whole comparison.
 
 Example output:
 
@@ -265,5 +293,4 @@ pytest tests/ -v -m network
 ## Planned
 
 - Sector-aware equity risk premium (ERP) adjustment
-- CLI `--compare AAPL MSFT GOOG` for side-by-side output
 - Earnings-date aware cache invalidation

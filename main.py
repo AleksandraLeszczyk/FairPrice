@@ -5,6 +5,7 @@ Usage:
     python main.py AAPL
     python main.py MSFT --no-cache
     python main.py NVDA --log-level DEBUG
+    python main.py --compare AAPL MSFT GOOG
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ _LINE = "─" * 58
 def main() -> None:
     parser = argparse.ArgumentParser(description="FairPrice stock valuation")
     parser.add_argument("ticker", nargs="?", default="AAPL")
+    parser.add_argument("--compare", nargs="+", metavar="TICKER",
+                        help="Compare two or more tickers side by side")
     parser.add_argument("--no-cache", action="store_true")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
@@ -29,16 +32,27 @@ def main() -> None:
         format="%(levelname)-8s %(name)s: %(message)s",
     )
 
-    ticker = args.ticker.upper()
-
     from fairprice.data import FinancialsClient, MacroClient, MarketClient
     from fairprice.nlp import SentimentClient
-    import fairprice.valuation as valuation_engine
 
     fin = FinancialsClient()
     mkt = MarketClient()
     mac = MacroClient()
     nlp = SentimentClient()
+
+    if args.compare:
+        tickers = [t.upper() for t in args.compare]
+        if len(tickers) < 2:
+            parser.error("--compare needs at least two tickers")
+        _compare(tickers, fin, mkt, mac, nlp)
+        return
+
+    ticker = args.ticker.upper()
+    _analyze_single(ticker, fin, mkt, mac, nlp)
+
+
+def _analyze_single(ticker, fin, mkt, mac, nlp) -> None:
+    import fairprice.valuation as valuation_engine
 
     print(f"\n{_SEP}")
     print(f"  FairPrice  |  {ticker}")
@@ -149,6 +163,96 @@ def main() -> None:
                 print(f"    › {h[:90]}")
 
     print(f"\n{_SEP}\n")
+
+
+# ── Compare mode ───────────────────────────────────────────────────────────
+
+def _compute(ticker, fin, mkt, mac, nlp):
+    """Fetch data and run the ensemble for one ticker. Returns a row dict."""
+    import fairprice.valuation as valuation_engine
+
+    profile = fin.get_profile(ticker)
+    stmts = fin.get_statements(ticker)
+    market = mkt.get_market_data(ticker)
+    macro = mac.get_macro_data()
+    macro.vix = market.vix
+    peers = fin.get_peers(ticker)
+    sent = nlp.get_sentiment(ticker)
+    result = valuation_engine.estimate(stmts, market, macro, peers, sentiment=sent)
+    return {"profile": profile, "result": result, "sentiment": sent}
+
+
+def _compare(tickers, fin, mkt, mac, nlp) -> None:
+    print(f"\n{_SEP}")
+    print(f"  FairPrice  |  COMPARE: {'  ·  '.join(tickers)}")
+    print(_SEP)
+
+    rows: dict[str, dict] = {}
+    for ticker in tickers:
+        try:
+            rows[ticker] = _compute(ticker, fin, mkt, mac, nlp)
+        except Exception as exc:  # noqa: BLE001 — one bad ticker shouldn't abort the run
+            print(f"\n  ⚠  {ticker}: failed to analyse ({exc})")
+
+    ok = [t for t in tickers if t in rows]
+    if not ok:
+        print(f"\n{_SEP}\n")
+        return
+
+    col_w = 14
+    label_w = 20
+
+    def line(label: str, cells: list[str]) -> None:
+        body = "".join(f"{c:>{col_w}}" for c in cells)
+        print(f"  {label:<{label_w}}{body}")
+
+    print()
+    line("Metric", ok)
+    line("─" * (label_w - 2), ["─" * (col_w - 2)] * len(ok))
+
+    def col(fn) -> list[str]:
+        return [fn(rows[t]) for t in ok]
+
+    line("Company", col(lambda r: r["profile"].name[:col_w - 1]))
+    line("Sector", col(lambda r: r["profile"].sector[:col_w - 1]))
+    line("Price", col(lambda r: f"${r['result'].current_price:,.2f}"))
+    line("Fair value (base)", col(lambda r: f"${r['result'].fair_value_base:,.2f}"))
+    line("  range low", col(lambda r: f"${r['result'].fair_value_low:,.2f}"))
+    line("  range high", col(lambda r: f"${r['result'].fair_value_high:,.2f}"))
+    line("Margin of safety", col(_fmt_mos))
+    line("Confidence", col(lambda r: f"{r['result'].confidence_score:.2f}"))
+    line("Sentiment", col(_fmt_sentiment))
+    line("Analyst", col(lambda r: (r["sentiment"].analyst_consensus or "–").upper()
+                                   if r["sentiment"] else "–"))
+    line("Verdict", col(lambda r: _verdict_tag(r["result"].margin_of_safety,
+                                               r["result"].confidence_score)))
+
+    print(f"\n{_SEP}\n")
+
+
+def _fmt_mos(r) -> str:
+    mos = r["result"].margin_of_safety * 100
+    sign = "+" if mos >= 0 else ""
+    return f"{sign}{mos:.0f}%"
+
+
+def _fmt_sentiment(r) -> str:
+    sent = r["sentiment"]
+    if not sent or (sent.n_articles + sent.n_alpaca_articles) == 0:
+        return "n/a"
+    score = sent.sentiment_score
+    tag = "▼" if score < -0.3 else "▲" if score > 0.3 else "~"
+    return f"{score:+.2f} {tag}"
+
+
+def _verdict_tag(mos: float, conf: float) -> str:
+    if conf < 0.30:
+        return "LOW CONF"
+    if mos > 0.20 and conf >= 0.50:
+        return "★ UNDER"
+    if mos < -0.20 and conf >= 0.50:
+        return "▼ OVER"
+    return "~ FAIR"
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
