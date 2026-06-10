@@ -159,3 +159,80 @@ def test_compute_ttm_empty():
     from fairprice.data.financials import _compute_ttm
     result = _compute_ttm(pd.DataFrame(), pd.DataFrame())
     assert result == {}
+
+
+# ── FMP circuit-breaker tests ────────────────────────────────────────────────
+
+def test_fmp_disabled_after_threshold(tmp_path, monkeypatch):
+    """After _FMP_ERROR_THRESHOLD errors, _fmp_disabled flips to True."""
+    import fairprice.config as cfg
+    import fairprice.data.financials as fin_mod
+    from fairprice.data.financials import FinancialsClient, _FMP_ERROR_THRESHOLD
+
+    monkeypatch.setattr(cfg.settings, "cache_dir", tmp_path)
+    monkeypatch.setattr(cfg.settings, "fmp_api_key", "dummy_key")
+
+    client = FinancialsClient()
+    assert not client._fmp_disabled
+
+    def _boom(*_):
+        raise ConnectionError("FMP is down")
+
+    for _ in range(_FMP_ERROR_THRESHOLD):
+        with pytest.raises(Exception):
+            client._try_fmp("test", _boom)
+
+    assert client._fmp_disabled
+    assert client._fmp_error_count >= _FMP_ERROR_THRESHOLD
+
+
+def test_fmp_disabled_raises_immediately(tmp_path, monkeypatch):
+    """Once disabled, _try_fmp raises without calling the function."""
+    import fairprice.config as cfg
+    from fairprice.data.financials import FinancialsClient
+
+    monkeypatch.setattr(cfg.settings, "cache_dir", tmp_path)
+    monkeypatch.setattr(cfg.settings, "fmp_api_key", "dummy_key")
+
+    client = FinancialsClient()
+    client._fmp_disabled = True
+
+    called = []
+    def _should_not_run(*_):
+        called.append(True)
+
+    with pytest.raises(RuntimeError, match="FMP disabled"):
+        client._try_fmp("test", _should_not_run)
+
+    assert not called
+
+
+def test_fmp_unavailable_when_no_key(tmp_path, monkeypatch):
+    import fairprice.config as cfg
+    from fairprice.data.financials import FinancialsClient
+
+    monkeypatch.setattr(cfg.settings, "cache_dir", tmp_path)
+    monkeypatch.setattr(cfg.settings, "fmp_api_key", "")
+
+    client = FinancialsClient()
+    assert not client._fmp_available()
+
+
+def test_key_metrics_yf_fallback_returns_dataframe(tmp_path, monkeypatch):
+    """_fetch_key_metrics_yf returns a DataFrame even when yfinance fields are sparse."""
+    import fairprice.config as cfg
+    from fairprice.data.financials import FinancialsClient
+
+    monkeypatch.setattr(cfg.settings, "cache_dir", tmp_path)
+
+    client = FinancialsClient()
+    # Patch yf.Ticker.info to return a minimal dict
+    import yfinance as yf
+    monkeypatch.setattr(
+        yf.Ticker, "info",
+        property(lambda self: {"trailingPE": 25.0, "returnOnEquity": 0.15}),
+    )
+    df = client._fetch_key_metrics_yf("AAPL")
+    assert isinstance(df, pd.DataFrame)
+    assert not df.empty
+    assert "peRatio" in df.columns

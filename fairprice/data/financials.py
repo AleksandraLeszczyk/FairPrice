@@ -4,9 +4,12 @@ Financial statements fetcher.
 Primary source : yfinance (no API key needed)
 Supplement     : Financial Modeling Prep (FMP) free tier — richer history,
                  peer lists, key metrics.  Set FMP_API_KEY in .env to enable.
+
+FMP reliability: if FMP fails 2+ times the client switches entirely to yfinance
+                 for the lifetime of the instance (self._fmp_disabled = True).
 """
 import logging
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import pandas as pd
 import requests
@@ -20,12 +23,15 @@ logger = logging.getLogger(__name__)
 
 FMP_BASE = "https://financialmodelingprep.com/stable"
 _fmp_limiter = RateLimiter(calls_per_minute=8)   # conservative within free 250/day cap
+_FMP_ERROR_THRESHOLD = 2  # disable FMP after this many cumulative errors
 
 
 class FinancialsClient(CachedClient):
 
     def __init__(self) -> None:
         super().__init__(settings.cache_dir / "financials", settings.cache_ttl_financials)
+        self._fmp_error_count: int = 0
+        self._fmp_disabled: bool = False
 
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
@@ -42,8 +48,37 @@ class FinancialsClient(CachedClient):
         return self._fetch_cached(f"peers:{ticker}", self._fetch_peers, ticker)
 
     def get_key_metrics(self, ticker: str) -> pd.DataFrame:
-        """FMP key-metrics endpoint: ROIC, EV/EBITDA, etc. (requires FMP key)."""
+        """Key metrics: ROIC, EV/EBITDA, etc. FMP when available, yfinance fallback."""
         return self._fetch_cached(f"metrics:{ticker}", self._fetch_key_metrics, ticker)
+
+    # ------------------------------------------------------------------ #
+    #  FMP error tracking                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _try_fmp(self, label: str, fn: Callable, *args: Any) -> Any:
+        """
+        Run an FMP call, track failures, and raise on error.
+        After _FMP_ERROR_THRESHOLD cumulative errors the client switches
+        to yfinance-only mode and every subsequent call raises immediately.
+        """
+        if self._fmp_disabled:
+            raise RuntimeError("FMP disabled — using yfinance fallback")
+        try:
+            result = fn(*args)
+            return result
+        except Exception as exc:
+            self._fmp_error_count += 1
+            if self._fmp_error_count >= _FMP_ERROR_THRESHOLD:
+                self._fmp_disabled = True
+                logger.warning(
+                    "FMP disabled after %d errors (last error in '%s': %s) "
+                    "— switching entirely to yfinance for this session",
+                    self._fmp_error_count, label, exc,
+                )
+            raise
+
+    def _fmp_available(self) -> bool:
+        return bool(settings.fmp_api_key) and not self._fmp_disabled
 
     # ------------------------------------------------------------------ #
     #  Private fetchers                                                    #
@@ -70,11 +105,12 @@ class FinancialsClient(CachedClient):
         cashflow = _normalize_yf(t.cashflow)
         quarterly = _normalize_yf(t.quarterly_financials)
 
-        # Supplement annual statements with FMP when key is available
         source = "yfinance"
-        if settings.fmp_api_key:
+        if self._fmp_available():
             try:
-                income, balance, cashflow = self._merge_fmp(ticker, income, balance, cashflow)
+                income, balance, cashflow = self._try_fmp(
+                    "merge_statements", self._merge_fmp, ticker, income, balance, cashflow
+                )
                 source = "yfinance+fmp"
             except Exception as exc:
                 logger.warning("FMP supplement failed for %s: %s", ticker, exc)
@@ -92,41 +128,47 @@ class FinancialsClient(CachedClient):
         )
 
     def _fetch_peers(self, ticker: str) -> list[str]:
-        if not settings.fmp_api_key:
-            logger.info("FMP key not set — peer list unavailable")
-            return []
-        try:
-            _fmp_limiter.wait()
-            url = f"{FMP_BASE}/stock-peers?symbol={ticker}&apikey={settings.fmp_api_key}"
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            data = r.json()
-            # return data[0].get("peersList", [])[:10] if data else []
-            return data or []
-        except Exception as exc:
-            logger.warning("Peer fetch failed for %s: %s", ticker, exc)
-            return []
+        if self._fmp_available():
+            try:
+                return self._try_fmp("peers", self._fetch_peers_fmp, ticker)
+            except Exception as exc:
+                logger.warning("FMP peer fetch failed for %s, using yfinance fallback: %s", ticker, exc)
+        return self._fetch_peers_yf(ticker)
 
     def _fetch_key_metrics(self, ticker: str) -> pd.DataFrame:
-        if not settings.fmp_api_key:
-            return pd.DataFrame()
-        try:
-            _fmp_limiter.wait()
-            url = (
-                f"{FMP_BASE}/key-metrics/{ticker}"
-                f"?limit={settings.financial_history_years * 4}"
-                f"&apikey={settings.fmp_api_key}"
-            )
-            r = requests.get(url, timeout=10)
-            r.raise_for_status()
-            df = pd.DataFrame(r.json())
-            if df.empty:
-                return df
-            df["date"] = pd.to_datetime(df["date"])
-            return df.set_index("date").sort_index()
-        except Exception as exc:
-            logger.warning("Key metrics fetch failed for %s: %s", ticker, exc)
-            return pd.DataFrame()
+        if self._fmp_available():
+            try:
+                return self._try_fmp("key_metrics", self._fetch_key_metrics_fmp, ticker)
+            except Exception as exc:
+                logger.warning("FMP key metrics failed for %s, using yfinance fallback: %s", ticker, exc)
+        return self._fetch_key_metrics_yf(ticker)
+
+    # ------------------------------------------------------------------ #
+    #  FMP implementations                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _fetch_peers_fmp(self, ticker: str) -> list[str]:
+        _fmp_limiter.wait()
+        url = f"{FMP_BASE}/stock-peers?symbol={ticker}&apikey={settings.fmp_api_key}"
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        return data or []
+
+    def _fetch_key_metrics_fmp(self, ticker: str) -> pd.DataFrame:
+        _fmp_limiter.wait()
+        url = (
+            f"{FMP_BASE}/key-metrics/{ticker}"
+            f"?limit={settings.financial_history_years * 4}"
+            f"&apikey={settings.fmp_api_key}"
+        )
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+        df = pd.DataFrame(r.json())
+        if df.empty:
+            return df
+        df["date"] = pd.to_datetime(df["date"])
+        return df.set_index("date").sort_index()
 
     def _merge_fmp(
         self,
@@ -163,6 +205,52 @@ class FinancialsClient(CachedClient):
         cashflow = _merge_new_cols(cashflow, fmp_cashflow)
 
         return income, balance, cashflow
+
+    # ------------------------------------------------------------------ #
+    #  yfinance fallbacks                                                  #
+    # ------------------------------------------------------------------ #
+
+    def _fetch_peers_yf(self, ticker: str) -> list[str]:
+        """
+        yfinance has no native peers endpoint.
+        Returns an empty list — callers should handle gracefully.
+        """
+        logger.info("Peer list unavailable via yfinance for %s", ticker)
+        return []
+
+    def _fetch_key_metrics_yf(self, ticker: str) -> pd.DataFrame:
+        """
+        Build a single-row key-metrics DataFrame from yfinance .info fields.
+        Covers the most commonly used ratios (P/E, P/B, EV/EBITDA, margins, ROE/ROA).
+        """
+        try:
+            info = yf.Ticker(ticker).info
+            row = {
+                "peRatio":             info.get("trailingPE"),
+                "forwardPE":           info.get("forwardPE"),
+                "pbRatio":             info.get("priceToBook"),
+                "evToEbitda":          info.get("enterpriseToEbitda"),
+                "evToRevenue":         info.get("enterpriseToRevenue"),
+                "roe":                 info.get("returnOnEquity"),
+                "roa":                 info.get("returnOnAssets"),
+                "grossProfitMargin":   info.get("grossMargins"),
+                "operatingProfitMargin": info.get("operatingMargins"),
+                "netProfitMargin":     info.get("profitMargins"),
+                "dividendYield":       info.get("dividendYield"),
+                "revenuePerShare":     info.get("revenuePerShare"),
+                "currentRatio":        info.get("currentRatio"),
+                "debtToEquity":        info.get("debtToEquity"),
+            }
+            row = {k: v for k, v in row.items() if v is not None}
+            if not row:
+                return pd.DataFrame()
+            today = pd.Timestamp.now().normalize()
+            df = pd.DataFrame([row], index=pd.DatetimeIndex([today]))
+            df.index.name = "date"
+            return df
+        except Exception as exc:
+            logger.warning("yfinance key metrics fallback failed for %s: %s", ticker, exc)
+            return pd.DataFrame()
 
 
 # ------------------------------------------------------------------ #
